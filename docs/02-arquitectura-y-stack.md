@@ -1,14 +1,15 @@
 # PEDILO — Documento 02: Arquitectura y Stack
 
-> **Estado:** Borrador para revisión
-> **Versión:** 0.2
-> **Fecha:** 2026-05-01
-> **Próximo paso:** revisar, marcar correcciones, aprobar antes de pasar a Documento 03 (modelo de datos)
+> **Estado:** ✅ Aprobado
+> **Versión:** 0.4
+> **Fecha de última actualización:** 2026-05-01
+> **Próximo paso:** redactar Documento 03 (modelo de datos)
 >
 > **Historial de cambios:**
 > - **v0.1 (2026-05-01):** borrador inicial (16 secciones).
 > - **v0.2 (2026-05-01):** sección 12 expandida — pagos online y comisión PEDILO con Patrones A (V2 inicial) y B (Marketplace, V2.x objetivo). Schema y hooks listos desde MVP para evitar migración futura.
 > - **v0.3 (2026-05-01):** sumada sección 17 — Escalabilidad, costos y triggers de migración. Niveles de carga, comparación de opciones cuando se rompe Realtime (Team Plan / Pusher / Self-hosted), reconciliación honesta revenue vs costos de infra, umbrales de alertas.
+> - **v0.4 (2026-05-01):** Doc 02 aprobado. Incorporadas implicancias arquitectónicas de los cambios introducidos en Doc 01 v1.3: Mesa Viva (canales Realtime con presence), Modo Social cross-mesa con safeguards (blocklist, moderación, kill switch), nuevas tablas/columnas para calificaciones de platos + filtros + recomendado del chef + chip individual/compartir + motivo de llamada al mozo, modo "Mozo dicta" con feature flag por tenant, riesgos RA8 (Modo Social) y RA9 (complejidad de feature flags por tenant).
 
 ---
 
@@ -299,11 +300,16 @@ Supabase Realtime expone tres mecanismos. Usamos los tres:
 **Patrón de naming:**
 
 ```
-tenant:<tenant_id>:orders:kitchen     ← display de cocina
-tenant:<tenant_id>:orders:bar         ← display de bar
-tenant:<tenant_id>:orders:waiters     ← panel de mozos
-tenant:<tenant_id>:tables:<table_id>  ← canal de una mesa específica
-                                       (cliente del comensal, mozo de esa mesa)
+tenant:<tenant_id>:orders:kitchen        ← display de cocina
+tenant:<tenant_id>:orders:bar            ← display de bar
+tenant:<tenant_id>:orders:waiters        ← panel de mozos
+tenant:<tenant_id>:tables:<table_id>     ← canal de una mesa específica
+                                          (estado del pedido + items finales)
+tenant:<tenant_id>:tables:<table_id>:live ← canal "Mesa Viva" (carrito en vivo
+                                            del grupo, presence de comensales,
+                                            items aún no confirmados)
+tenant:<tenant_id>:social                ← canal "Modo Social" (cross-mesa,
+                                            solo si feature flag activo)
 ```
 
 **Suscripciones por rol:**
@@ -311,12 +317,40 @@ tenant:<tenant_id>:tables:<table_id>  ← canal de una mesa específica
 - Cocinero → `tenant:<tid>:orders:kitchen`.
 - Bartender → `tenant:<tid>:orders:bar`.
 - Mozo → `tenant:<tid>:orders:waiters` + `tenant:<tid>:tables:*` (todas las mesas que atiende).
-- Comensal → `tenant:<tid>:tables:<table_id>` (solo la suya).
+- Comensal → `tenant:<tid>:tables:<table_id>` + `tenant:<tid>:tables:<table_id>:live` (solo la suya). Opcionalmente `tenant:<tid>:social` si el local activó Modo Social y el comensal optó.
 - Admin → todos los canales del tenant.
 
 **Validación del lado servidor:** Supabase permite definir RLS también sobre los eventos Realtime, garantizando que un usuario malicioso no pueda subscribirse a canales de otro tenant.
 
-### 6.3. Disparo de eventos
+### 6.3. "Mesa Viva" — vista compartida del grupo en tiempo real
+
+**Concepto** (ver Doc 01 §5.3): cada comensal de una mesa ve qué pidieron los demás en tiempo real, con avatar/nickname/items/status. Es el **diferenciador estrella** de PEDILO.
+
+**Arquitectura:**
+
+- **Canal dedicado:** `tenant:<tid>:tables:<table_id>:live`. Distinto del canal `:tables:<table_id>` que carga estados oficiales del pedido (DB-persisted) — el canal `:live` lleva estado **efímero** del carrito y de la presence.
+- **Postgres Presence** sobre el canal `:live` para saber qué comensales están conectados a la mesa. El servidor puede consultar `presence_state` para mostrar "🟢 Andrea conectada".
+- **Broadcast events** (no DB-persisted) para items en armado:
+  ```json
+  // Andrea agregó un item al carrito (todavía no confirmó pedido)
+  { "type": "draft_item_added", "comensal_id": "...", "nickname": "Andrea",
+    "item_preview": "Milanesa napolitana" }
+
+  // Status del comensal cambió
+  { "type": "comensal_status_changed", "comensal_id": "...",
+    "status": "decidiendo" | "listo_para_confirmar" | "pedido_enviado" }
+  ```
+- **Postgres Changes** sobre tabla `order_items` para items ya confirmados (estado oficial).
+- **Cliente reconcilia** ambas fuentes: items confirmados (de DB) + drafts efímeros (de broadcast).
+
+**Por qué canal separado `:live`:**
+- Aislar volumen de eventos efímeros (cada tipo de letra en el carrito → broadcast) del canal de eventos persistidos.
+- Permite kill switch independiente: si el broadcast se vuelve costoso, se desactiva sin afectar la persistencia del pedido.
+- En MVP: el `:live` es opcional para el cliente del comensal (degradado: si se cae, sigue viendo solo items confirmados).
+
+**Costo de Realtime estimado:** un grupo de 4 comensales en mesa típica genera ~50-200 broadcasts durante una cena de 1 hora. Bajo. Encaja en tier Pro de Supabase sin issues hasta ~50 mesas activas en pico simultáneo (ver §17).
+
+### 6.4. Disparo de eventos
 
 Postgres triggers que ejecutan `realtime.broadcast()` cuando cambia el estado de un item:
 
@@ -333,13 +367,13 @@ END;
 $$ LANGUAGE plpgsql;
 ```
 
-### 6.4. Performance objetivo
+### 6.5. Performance objetivo
 
 - **Latencia de propagación:** < 2 segundos del `UPDATE` al render en cliente.
 - **Concurrencia objetivo MVP:** 200 conexiones simultáneas (suficiente para 20 locales × 10 dispositivos).
 - **Concurrencia escalada:** 5.000+ con Supabase Pro.
 
-### 6.5. Fallback ante caída de Realtime
+### 6.6. Fallback ante caída de Realtime
 
 Si la suscripción WebSocket cae, el cliente:
 1. Muestra banner "reconectando…".
@@ -634,6 +668,102 @@ GET /api/health → {
 
 Por ahora se loguean como warnings; las acciones automáticas se evalúan en V1.x.
 
+### 10.5. Safeguards específicos para "Modo Social" (Premium V1.x / V2)
+
+> *Modo Social = interacción cross-mesa entre comensales (ver Doc 01 §6.1). Es feature Premium opt-in, NO MVP, pero se diseña arquitectónicamente desde acá para no improvisar después.*
+
+Como el feature tiene riesgo alto de harassment / privacy / moderation, **la arquitectura debe incluir safeguards desde el día 1** del feature (no solo cuando un incidente ocurra):
+
+**Tablas adicionales necesarias** (V1.x cuando se implemente):
+
+```sql
+-- Toggle del Modo Social por tenant
+ALTER TABLE tenants ADD COLUMN social_mode_enabled BOOLEAN NOT NULL DEFAULT false;
+
+-- Opt-in del comensal por sesión
+CREATE TABLE social_optins (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  table_session_id UUID NOT NULL REFERENCES table_sessions(id),
+  comensal_id UUID NOT NULL,
+  device_id TEXT NOT NULL,
+  opted_in_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  opted_out_at TIMESTAMPTZ,
+  UNIQUE (tenant_id, table_session_id, comensal_id)
+);
+
+-- Saludos públicos cross-mesa (NO chat privado en MVP del feature)
+CREATE TABLE social_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  from_table_session_id UUID NOT NULL REFERENCES table_sessions(id),
+  from_comensal_id UUID NOT NULL,
+  to_table_session_id UUID NOT NULL REFERENCES table_sessions(id),
+  message_type TEXT NOT NULL,  -- 'salud' | 'felicitacion' | 'cumple'
+  content TEXT,                 -- texto opcional, max 100 chars, filtrado
+  flagged BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Bloqueos entre device_id (1 tap del comensal)
+CREATE TABLE social_blocks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  blocker_device_id TEXT NOT NULL,
+  blocked_device_id TEXT NOT NULL,
+  reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (tenant_id, blocker_device_id, blocked_device_id)
+);
+
+-- Reportes de mensajes
+CREATE TABLE social_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  message_id UUID REFERENCES social_messages(id),
+  reporter_device_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  resolved_at TIMESTAMPTZ,
+  resolved_by UUID REFERENCES auth.users(id),
+  resolution TEXT,  -- 'banned' | 'warned' | 'dismissed'
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Bans de device_id por tenant
+CREATE TABLE social_bans (
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  device_id TEXT NOT NULL,
+  banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  banned_until TIMESTAMPTZ,  -- NULL = permanente
+  reason TEXT,
+  PRIMARY KEY (tenant_id, device_id)
+);
+```
+
+**Rate limits específicos del Modo Social:**
+
+| Endpoint | Límite | Clave |
+|---|---|---|
+| Enviar saludo cross-mesa | 3/15 min | `from_device_id` + `tenant_id` |
+| Reportar mensaje | 10/hora | `reporter_device_id` |
+| Modificar opt-in | 5/hora | `device_id` |
+
+**Otras mitigaciones obligatorias:**
+
+- **Doble opt-in:** local activa `social_mode_enabled` + cada comensal acepta al escanear QR.
+- **Solo saludos públicos** visibles a la mesa entera (no chat privado al inicio).
+- **Auto-moderación:** filtro de palabras antes de publicar; mensaje queda `flagged=true` si contiene términos sensibles, requiere aprobación.
+- **Bloqueo en 1 tap:** UI prominente "bloquear esta mesa".
+- **Kill switch global:** flag de feature en config global de PEDILO. Apagar Modo Social en todos los tenants en <1 minuto desde dashboard interno.
+- **Lanzamiento gradual:** primero en 2-3 locales pilotos opt-in. No general availability hasta validar.
+- **Audit log completo:** cada saludo, cada bloqueo, cada reporte queda persistido para auditoría legal eventual.
+
+**Diseño UI defensivo:**
+- Default: opt-in del comensal NO está pre-aceptado. Tiene que confirmar con un tap.
+- Saludos pre-armados predominantes ("¡salud!", "feliz cumpleaños", "buen provecho") sobre texto libre.
+- Texto libre limitado a 100 caracteres + auto-filtrado.
+- Distinción visual clara entre "tu mesa" y "otra mesa" (NO confusión).
+
 ---
 
 ## 11. Estrategia de testing
@@ -850,6 +980,14 @@ Vercel + Next.js soportan este patrón vía middleware que detecta el host heade
 | D8 | **Internacionalización** | NO en MVP (solo español). Reservar `next-intl` para post-MVP. |
 | D9 | **Analytics de producto** | **PostHog** (free tier) o **Plausible**. Tracking de eventos clave (signup, primer pedido, etc.). Decidir cuál cerca del piloto. |
 | D10 | **Job scheduler** (cron de timeouts) | **Vercel Cron** (incluido en plan Pro). Alternativa: pg_cron en Supabase. Decisión: Vercel Cron para MVP. |
+| D11 | **Modelo de datos para calificaciones de platos** (sumadas en Doc 01 v1.3) | Tabla `product_ratings` con `(product_id, device_id, rating 1-5, comment_optional, created_at)`. UNIQUE constraint en `(product_id, device_id)` — un device califica un producto una vez. Promedio se calcula on-demand o vía vista materializada. |
+| D12 | **Top platos / filtros (rápidos, mejor calificados)** | Vista materializada `product_stats` con `(product_id, total_orders_7d, avg_prep_time_min, avg_rating, ratings_count)`. Refresh cada hora vía cron. Trade-off: simplicidad vs frescura — 1 hora de delay es aceptable. |
+| D13 | **Recomendado del chef** | Columna boolean `chef_recommended` en `products`, toggle desde admin. Trivial. |
+| D14 | **Chip "individual / para compartir"** | Columna enum `serving_type` en `products`: `'individual' \| 'shared' \| 'either'`. Default `'individual'`. |
+| D15 | **Motivo de "llamar al mozo"** | Tabla `waiter_calls` con `(table_session_id, comensal_id, reason, created_at, attended_at, attended_by)`. `reason` enum: `'agua' \| 'ayuda' \| 'cuenta' \| 'queja' \| 'otro'`. |
+| D16 | **Modo "Mozo dicta"** (locales sin display de cocina/bar) | Feature flag por tenant: `kitchen_display_enabled BOOLEAN DEFAULT true` y `bar_display_enabled BOOLEAN DEFAULT true`. Cuando un flag está `false`, los items destinados a esa estación se ROUTEAN al panel del mozo en lugar del display de la estación. El mozo los ve y los lleva manualmente. **NO es modo separado de UI** — es solo enrutamiento. |
+| D17 | **Memoria del comensal por `device_id` (S12)** | `device_id` ya existe en cada item (Doc 01 §5.4). En MVP no se expone al comensal. **V1.x** sumar tabla `comensal_history` para queries tipo "lo que pediste antes en este local". **V2** sumar `accounts` opcionales para cross-device (login con email/Google opt-in). |
+| D18 | **Modo Social — schema y safeguards** | Detallado en §10.5. Tablas: `social_optins`, `social_messages`, `social_blocks`, `social_reports`, `social_bans`. Feature flag `tenants.social_mode_enabled`. NO MVP — V1.x/V2. |
 
 ---
 
@@ -864,16 +1002,19 @@ Vercel + Next.js soportan este patrón vía middleware que detecta el host heade
 | RA5 | Costo de Supabase Realtime escala mal con concurrencia alta | Monitorear conexiones simultáneas, considerar self-hosted Realtime si supera USD 200/mes. |
 | RA6 | Lock-in con Supabase complica migración futura | Capa de abstracción mínima en `lib/supabase/*`. Postgres es portable; Auth y Realtime sí requieren reemplazo si migra. |
 | RA7 | Vercel Serverless cold starts en endpoints poco usados | Endpoints críticos del cliente del comensal son SSR/CSR híbridos, no serverless puro. Evaluar Edge Runtime para handlers de pedido. |
+| RA8 | **"Modo Social" mal diseñado se vuelve incidente legal/reputacional** (harassment, datos personales, denuncias) | NO es feature MVP — diseño detallado pospuesto a post-piloto con data real. Cuando se implemente: doble opt-in obligatorio, solo saludos públicos (no chat privado al inicio), kill switch global, lanzamiento gradual, audit log completo, moderación automática + reportes. Detalle en §10.5. |
+| RA9 | **Complejidad creciente de feature flags por tenant** (display de cocina sí/no, social mode sí/no, payment_mode A/B/none, etc.) | Encapsular en una sola tabla `tenant_features` con columnas booleans + JSON config. Centralizar lectura en helper `getTenantFeatures(tenantId)` con cache. Evita "if (tenant.x && tenant.y && tenant.z)" disperso por todo el código. |
+| RA10 | **Mesa Viva genera más eventos Realtime de lo previsto** (cada keypress en carrito → broadcast) | Throttle/debounce en cliente: máximo 1 broadcast cada 500ms por comensal por tipo de evento. Postgres Presence se actualiza solo en eventos significativos. Si el costo escala mal, kill switch del canal `:live` (degrada gracefully a "ver solo items confirmados"). |
 
 ---
 
 ## 16. Pendientes antes de pasar al Documento 03 (modelo de datos)
 
-- [ ] **Vos:** revisar este documento, marcar correcciones / cambios.
-- [ ] **Vos:** confirmar las **10 decisiones pendientes** (sección 14) o ajustarlas.
-- [ ] **Vos:** confirmar los **7 riesgos arquitectónicos** (sección 15) o sumar otros.
-- [ ] **Vos:** revisar los **triggers de migración de la sección 17** y ajustar umbrales si querés.
-- [ ] **Yo:** una vez aprobado, redactar Documento 03 con el modelo de datos completo (entidades, relaciones, schemas SQL, RLS policies).
+- [x] **Vos:** revisar este documento, marcar correcciones / cambios. ✅ Aprobado v0.4 el 2026-05-01.
+- [x] **Vos:** confirmar las decisiones pendientes (sección 14, ahora D1–D18) o ajustarlas. ✅ Aceptados los defaults; ajustes vendrán durante el desarrollo si hace falta.
+- [x] **Vos:** confirmar los riesgos arquitectónicos (sección 15, ahora RA1–RA10) o sumar otros. ✅ Aceptados.
+- [x] **Vos:** revisar los **triggers de migración de la sección 17** y ajustar umbrales si querés. ✅ Aceptados.
+- [ ] **Yo:** redactar Documento 03 con el modelo de datos completo (entidades, relaciones, schemas SQL, RLS policies) — incluyendo todas las tablas/columnas confirmadas en D1–D18.
 
 ---
 

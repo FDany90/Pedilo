@@ -10,7 +10,7 @@
 | # | Documento | Archivo | Estado | Cuándo se redacta |
 |---|---|---|---|---|
 | **01** | **Visión y Alcance del MVP** | [01-vision-y-alcance-mvp.md](01-vision-y-alcance-mvp.md) | ✅ Aprobado v1.1 | Hecho |
-| **02** | **Arquitectura y Stack** | [02-arquitectura-y-stack.md](02-arquitectura-y-stack.md) | 📝 Borrador v0.3, pendiente revisión | En curso |
+| **02** | **Arquitectura y Stack** | [02-arquitectura-y-stack.md](02-arquitectura-y-stack.md) | ✅ Aprobado v0.4 | Hecho |
 | **03** | **Modelo de Datos** (entidades, relaciones, schemas SQL, RLS policies) | `03-modelo-de-datos.md` | ⏳ Pendiente | Después de aprobar Doc 02 |
 | **04** | **UI/UX y Wireframes en Figma** | `04-ui-ux-wireframes.md` | ⏳ Pendiente | Después de Doc 03 |
 | **05** | **Plan de Desarrollo por Fases** (hitos, sprints, criterios de hecho) | `05-plan-de-desarrollo.md` | ⏳ Pendiente | Después de Doc 04 |

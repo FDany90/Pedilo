@@ -11,7 +11,7 @@
 |---|---|---|---|---|
 | **01** | **Visión y Alcance del MVP** | [01-vision-y-alcance-mvp.md](01-vision-y-alcance-mvp.md) | ✅ Aprobado v1.1 | Hecho |
 | **02** | **Arquitectura y Stack** | [02-arquitectura-y-stack.md](02-arquitectura-y-stack.md) | ✅ Aprobado v0.4 | Hecho |
-| **03** | **Modelo de Datos** (entidades, relaciones, schemas SQL, RLS policies) | `03-modelo-de-datos.md` | ⏳ Pendiente | Después de aprobar Doc 02 |
+| **03** | **Modelo de Datos** (entidades, relaciones, schemas SQL, RLS policies) | [03-modelo-de-datos.md](03-modelo-de-datos.md) | 📝 Borrador v0.1 | En revisión |
 | **04** | **UI/UX y Wireframes en Figma** | `04-ui-ux-wireframes.md` | ⏳ Pendiente | Después de Doc 03 |
 | **05** | **Plan de Desarrollo por Fases** (hitos, sprints, criterios de hecho) | `05-plan-de-desarrollo.md` | ⏳ Pendiente | Después de Doc 04 |
 | **06** | **Operación y Soporte Productivo** (SLAs, runbooks, on-call, status page, comunicación de incidentes) | `06-operacion-y-soporte.md` | ⏳ Pendiente | **Cerca del piloto** (no antes) |

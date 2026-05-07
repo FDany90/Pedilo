@@ -18,7 +18,7 @@ La documentación viva está en [`docs/`](docs/). Empezá por el índice:
 
 - [01 — Visión y Alcance del MVP](docs/01-vision-y-alcance-mvp.md) ✅ Aprobado v1.3
 - [02 — Arquitectura y Stack](docs/02-arquitectura-y-stack.md) ✅ Aprobado v0.4
-- 03 — Modelo de Datos (pendiente)
+- [03 — Modelo de Datos](docs/03-modelo-de-datos.md) 📝 Borrador v0.1
 - 04 — UI/UX y Wireframes (pendiente)
 - 05 — Plan de Desarrollo por Fases (pendiente)
 - 06 — Operación y Soporte (pendiente, post-piloto)
